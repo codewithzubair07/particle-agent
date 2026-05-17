@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  particle:
+    image: particle-agent:latest
+    container_name: particle-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    working_dir: /app
+    command: ["python", "main.py"]
+    volumes:
+      - ./context:/app/context
+      - ./data:/app/data
+      - ./logs:/app/logs

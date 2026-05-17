@@ -1,0 +1,54 @@
+app:
+  name: Particle
+  environment: development
+  timezone: UTC
+  polling_interval_minutes: 15
+
+paths:
+  base_dir: .
+  context_dir: context
+  data_dir: data
+  logs_dir: logs
+  task_db: data/tasks.db
+  memory_db: data/memory.db
+  chroma_dir: data/chroma
+  log_file: logs/particle.log
+
+llm:
+  provider_order:
+    - gemini-2.0-flash-exp
+    - gemini-1.5-flash
+    - openrouter
+  openrouter_models:
+    - meta-llama/llama-3.1-8b-instruct:free
+    - nvidia/nemotron-3-super-120b-a12b:free
+    - mistralai/mistral-7b-instruct:free
+  max_retries_per_provider: 3
+  request_timeout_seconds: 45
+
+telegram:
+  enabled: true
+  default_status: available
+
+email:
+  imap_host: imap.gmail.com
+  imap_port: 993
+  smtp_host: smtp.gmail.com
+  smtp_port: 587
+  digest_hour: 9
+
+calendar:
+  enabled: true
+  reminder_minutes: 15
+
+voice:
+  enabled: true
+  whisper_model: base
+
+browser:
+  enabled: false
+  pinchtab_url: http://localhost:9867
+  max_sources_per_research: 3
+
+logging:
+  level: INFO

@@ -1,0 +1,17 @@
+[Unit]
+Description=Particle Autonomous AI Assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/particle-agent
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/particle-agent/.venv/bin/python /home/ubuntu/particle-agent/main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

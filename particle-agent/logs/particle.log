@@ -1,0 +1,4 @@
+2026-05-17 22:59:15,388 | INFO     | particle.main | Particle starting up (env=development, log_level=INFO)
+2026-05-17 22:59:15,388 | INFO     | particle.main | Configuration validation passed — exiting
+2026-05-17 23:01:43,845 | INFO     | particle.main | Particle starting up (env=development, log_level=INFO)
+2026-05-17 23:01:43,845 | INFO     | particle.main | Configuration validation passed — exiting

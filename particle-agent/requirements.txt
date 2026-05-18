@@ -1,15 +1,44 @@
-PyYAML
-python-dotenv
-requests
-tenacity
-python-telegram-bot
-google-api-python-client
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
-selenium
-chromadb
-pypdf
-python-docx
-mistral-inference
-openai-whisper
+# Core
+PyYAML>=6.0
+python-dotenv>=1.0
+
+# HTTP / API
+requests>=2.31
+tenacity>=8.2
+
+# LLM providers
+# (Gemini and OpenRouter accessed via requests — no extra SDK required)
+
+# Telegram bot
+python-telegram-bot[all]>=21.0
+
+# Google APIs
+google-api-python-client>=2.100
+google-auth>=2.22
+google-auth-oauthlib>=1.1
+google-auth-httplib2>=0.2
+
+# Browser automation
+selenium>=4.15
+webdriver-manager>=4.0
+
+# Vector / context store
+chromadb>=0.4
+
+# Document parsing
+pypdf>=3.17
+python-docx>=1.0
+
+# Scheduling
+APScheduler>=3.10
+
+# Voice — STT
+openai-whisper>=20231117
+
+# Voice — TTS
+kokoro-onnx>=0.3
+
+# Audio I/O
+sounddevice>=0.4
+soundfile>=0.12
+numpy>=1.24

@@ -5,7 +5,7 @@ Text-to-Speech:
   Falls back to printing text to stdout if the package is unavailable.
 
 Speech-to-Text:
-  Uses OpenAI Whisper (local, no API key) with the 'base' model.
+  Uses Mistral Voxtral via the API (requires API key).
   Input audio can be recorded from the default microphone via ``sounddevice``
   or provided as a file path.
 
@@ -15,6 +15,7 @@ optional audio packages are not installed.
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import tempfile
@@ -41,11 +42,12 @@ except ImportError:
     _NUMPY_AVAILABLE = False
 
 try:
-    import whisper as _whisper  # type: ignore
-    _WHISPER_AVAILABLE = True
+    from mistralai import Mistral  # type: ignore
+    _MISTRAL_AVAILABLE = True
 except ImportError:
-    _WHISPER_AVAILABLE = False
-    logger.warning("openai-whisper not installed — STT unavailable")
+    Mistral = None  # type: ignore
+    _MISTRAL_AVAILABLE = False
+    logger.warning("mistralai not installed — Voxtral STT/TTS unavailable")
 
 try:
     import sounddevice as sd  # type: ignore
@@ -62,25 +64,26 @@ except ImportError:
     logger.warning("kokoro-onnx not installed — TTS will fall back to text output")
 
 _SAMPLE_RATE = 24000   # kokoro default output sample rate
-_MIC_SAMPLE_RATE = 16000  # whisper expects 16 kHz
+_MIC_SAMPLE_RATE = 16000  # STT expects 16 kHz
 _DEFAULT_VOICE = "af_heart"
 
 
 class VoiceEngine:
-    """Local TTS (kokoro-onnx) and STT (Whisper) engine."""
+    """Local TTS (kokoro-onnx) and STT (Voxtral) engine."""
 
     def __init__(self) -> None:
         cfg = get_config()
         voice_cfg = cfg.voice
         self._enabled: bool = bool(getattr(voice_cfg, "enabled", True))
-        self._whisper_model_name: str = str(getattr(voice_cfg, "whisper_model", "base"))
+        self._voice_engine: str = str(getattr(voice_cfg, "voice_engine", "kokoro")).lower()
+        self._mistral_key: str = str(getattr(cfg.llm, "mistral_api_key", ""))
         self._lock = threading.Lock()
         self._kokoro: Optional[object] = None
-        self._whisper_model = None
+        self._stt = None
 
         if self._enabled:
             self._init_kokoro()
-            self._init_whisper()
+            self._init_voxtral()
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -96,26 +99,37 @@ class VoiceEngine:
             logger.error("Failed to initialise Kokoro TTS: %s", exc)
             self._kokoro = None
 
-    def _init_whisper(self) -> None:
-        if not _WHISPER_AVAILABLE:
+    def _init_voxtral(self) -> None:
+        if not _MISTRAL_AVAILABLE or Mistral is None:
+            return
+        if not self._mistral_key:
+            logger.warning("Mistral API key missing — Voxtral STT/TTS unavailable")
             return
         try:
-            logger.info("Loading Whisper model '%s' (may take a moment)…", self._whisper_model_name)
-            self._whisper_model = _whisper.load_model(self._whisper_model_name)
-            logger.info("Whisper model '%s' loaded", self._whisper_model_name)
+            self._stt = Mistral(api_key=self._mistral_key)
+            logger.info("Mistral Voxtral client initialised")
         except Exception as exc:
-            logger.error("Failed to load Whisper model '%s': %s", self._whisper_model_name, exc)
-            self._whisper_model = None
+            logger.error("Failed to initialise Mistral Voxtral client: %s", exc)
+            self._stt = None
 
     # ------------------------------------------------------------------
     # Text-to-Speech
     # ------------------------------------------------------------------
 
     def speak(self, text: str, voice: str = _DEFAULT_VOICE, speed: float = 1.0) -> bool:
-        """Synthesise and play *text* via Kokoro TTS.
+        """Synthesise and play *text* via the configured TTS engine.
 
         Returns True on success, False if TTS is unavailable.
         """
+        if self._voice_engine == "voxtral":
+            if not self._enabled:
+                logger.debug("Voice disabled — skipping TTS for: %s", text[:80])
+                return False
+            if self.speak_voxtral(text):
+                return True
+        return self._speak_kokoro(text, voice, speed)
+
+    def _speak_kokoro(self, text: str, voice: str, speed: float) -> bool:
         if not self._enabled:
             logger.debug("Voice disabled — skipping TTS for: %s", text[:80])
             return False
@@ -139,6 +153,46 @@ class VoiceEngine:
             return True
         except Exception as exc:
             logger.error("TTS speak error: %s", exc)
+            return False
+
+    def speak_voxtral(self, text: str) -> bool:
+        """Synthesise and play *text* via Mistral Voxtral."""
+        if self._stt is None:
+            logger.warning("Voxtral client unavailable — cannot synthesize speech")
+            return False
+        if not _SOUNDDEVICE_AVAILABLE:
+            logger.warning("sounddevice unavailable — cannot play Voxtral audio")
+            return False
+
+        try:
+            response = self._stt.audio.speech.create(
+                model="voxtral-mini-latest",
+                voice="user_clone",
+                input=text,
+            )
+        except Exception as exc:
+            logger.error("Voxtral TTS API error: %s", exc)
+            return False
+
+        try:
+            import soundfile as sf  # type: ignore
+        except ImportError:
+            logger.error("soundfile not installed — cannot decode Voxtral audio")
+            return False
+
+        audio_bytes = getattr(response, "audio", None) or getattr(response, "data", None)
+        if not audio_bytes:
+            logger.error("Voxtral TTS response missing audio payload")
+            return False
+
+        try:
+            samples, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+            sd.play(samples, samplerate=sample_rate)
+            sd.wait()
+            logger.debug("Voxtral TTS playback complete for %d chars", len(text))
+            return True
+        except Exception as exc:
+            logger.error("Voxtral TTS playback error: %s", exc)
             return False
 
     def synthesize_to_file(
@@ -179,17 +233,22 @@ class VoiceEngine:
     # ------------------------------------------------------------------
 
     def transcribe_file(self, audio_path: "str | Path") -> str:
-        """Transcribe an audio file using Whisper.
+        """Transcribe an audio file using Voxtral.
 
         Returns the transcript string, or empty string on failure.
         """
-        if self._whisper_model is None:
-            logger.warning("Whisper model unavailable — cannot transcribe")
+        if self._stt is None:
+            logger.warning("Voxtral client unavailable — cannot transcribe")
             return ""
 
         try:
-            result = self._whisper_model.transcribe(str(audio_path))
-            text: str = result.get("text", "").strip()
+            audio_path = Path(audio_path)
+            with audio_path.open("rb") as handle:
+                response = self._stt.audio.transcriptions.complete(
+                    model="voxtral-mini-latest",
+                    file={"content": handle, "file_name": audio_path.name},
+                )
+            text: str = response.text.strip()
             logger.info("Transcribed %s: %d chars", Path(str(audio_path)).name, len(text))
             return text
         except Exception as exc:
@@ -197,15 +256,15 @@ class VoiceEngine:
             return ""
 
     def record_and_transcribe(self, duration_seconds: float = 5.0) -> str:
-        """Record from the default microphone and transcribe with Whisper.
+        """Record from the default microphone and transcribe with Voxtral.
 
         Returns the transcript string, or empty string on failure.
         """
         if not _SOUNDDEVICE_AVAILABLE:
             logger.warning("sounddevice unavailable — cannot record")
             return ""
-        if self._whisper_model is None:
-            logger.warning("Whisper model unavailable — cannot transcribe recording")
+        if self._stt is None:
+            logger.warning("Voxtral client unavailable — cannot transcribe recording")
             return ""
 
         logger.info("Recording %.1fs of audio at %dHz…", duration_seconds, _MIC_SAMPLE_RATE)
@@ -241,26 +300,39 @@ class VoiceEngine:
                 pass
 
     def transcribe_audio_array(self, audio: object, sample_rate: int = _MIC_SAMPLE_RATE) -> str:
-        """Transcribe a NumPy float32 audio array using Whisper.
+        """Transcribe a NumPy float32 audio array using Voxtral.
 
         Useful when audio is already in memory (e.g. from meeting recorder).
         """
-        if self._whisper_model is None:
+        if self._stt is None:
             return ""
         if not _NUMPY_AVAILABLE or _np is None:
             logger.warning("numpy unavailable — cannot transcribe audio array")
+            return ""
+
+        try:
+            import soundfile as sf  # type: ignore
+        except ImportError:
+            logger.error("soundfile not installed — cannot write temp audio")
             return ""
 
         arr = _np.asarray(audio, dtype="float32")
         if arr.ndim > 1:
             arr = arr.mean(axis=1)
 
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
         try:
-            result = self._whisper_model.transcribe(arr)
-            return result.get("text", "").strip()
+            sf.write(tmp_path, arr, sample_rate)
+            return self.transcribe_file(tmp_path)
         except Exception as exc:
             logger.error("transcribe_audio_array error: %s", exc)
             return ""
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------

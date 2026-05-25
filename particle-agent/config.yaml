@@ -43,7 +43,7 @@ calendar:
 
 voice:
   enabled: true
-  whisper_model: base
+  voice_engine: kokoro
 
 browser:
   enabled: false

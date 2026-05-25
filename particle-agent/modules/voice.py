@@ -5,7 +5,7 @@ Text-to-Speech:
   Falls back to printing text to stdout if the package is unavailable.
 
 Speech-to-Text:
-  Uses Mistral Voxtral via the API (requires API key).
+  Uses Voxtral via the Hugging Face Inference API (requires HF token).
   Input audio can be recorded from the default microphone via ``sounddevice``
   or provided as a file path.
 
@@ -15,13 +15,14 @@ optional audio packages are not installed.
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 import tempfile
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+
+import requests
 
 from modules.config_loader import get_config
 
@@ -40,14 +41,6 @@ try:
 except ImportError:
     _np = None  # type: ignore
     _NUMPY_AVAILABLE = False
-
-try:
-    from mistralai import Mistral  # type: ignore
-    _MISTRAL_AVAILABLE = True
-except ImportError:
-    Mistral = None  # type: ignore
-    _MISTRAL_AVAILABLE = False
-    logger.warning("mistralai not installed — Voxtral STT/TTS unavailable")
 
 try:
     import sounddevice as sd  # type: ignore
@@ -76,10 +69,9 @@ class VoiceEngine:
         voice_cfg = cfg.voice
         self._enabled: bool = bool(getattr(voice_cfg, "enabled", True))
         self._voice_engine: str = str(getattr(voice_cfg, "voice_engine", "kokoro")).lower()
-        self._mistral_key: str = str(getattr(cfg.llm, "mistral_api_key", ""))
+        self._stt_ready = False
         self._lock = threading.Lock()
         self._kokoro: Optional[object] = None
-        self._stt = None
 
         if self._enabled:
             self._init_kokoro()
@@ -100,17 +92,16 @@ class VoiceEngine:
             self._kokoro = None
 
     def _init_voxtral(self) -> None:
-        if not _MISTRAL_AVAILABLE or Mistral is None:
+        cfg = get_config()
+        self._hf_token = str(getattr(cfg.llm, "hf_token", ""))
+        self._hf_url = "https://api-inference.huggingface.co/models/mistralai/Voxtral-Mini-3B-2507"
+        self._hf_headers = {"Authorization": f"Bearer {self._hf_token}"}
+        if not self._hf_token:
+            logger.warning("HF_TOKEN missing — Voxtral STT unavailable")
+            self._stt_ready = False
             return
-        if not self._mistral_key:
-            logger.warning("Mistral API key missing — Voxtral STT/TTS unavailable")
-            return
-        try:
-            self._stt = Mistral(api_key=self._mistral_key)
-            logger.info("Mistral Voxtral client initialised")
-        except Exception as exc:
-            logger.error("Failed to initialise Mistral Voxtral client: %s", exc)
-            self._stt = None
+        self._stt_ready = True
+        logger.info("HF Voxtral STT initialised")
 
     # ------------------------------------------------------------------
     # Text-to-Speech
@@ -156,44 +147,11 @@ class VoiceEngine:
             return False
 
     def speak_voxtral(self, text: str) -> bool:
-        """Synthesise and play *text* via Mistral Voxtral."""
-        if self._stt is None:
-            logger.warning("Voxtral client unavailable — cannot synthesize speech")
-            return False
-        if not _SOUNDDEVICE_AVAILABLE:
-            logger.warning("sounddevice unavailable — cannot play Voxtral audio")
-            return False
-
-        try:
-            response = self._stt.audio.speech.create(
-                model="voxtral-mini-latest",
-                voice="user_clone",
-                input=text,
-            )
-        except Exception as exc:
-            logger.error("Voxtral TTS API error: %s", exc)
-            return False
-
-        try:
-            import soundfile as sf  # type: ignore
-        except ImportError:
-            logger.error("soundfile not installed — cannot decode Voxtral audio")
-            return False
-
-        audio_bytes = getattr(response, "audio", None) or getattr(response, "data", None)
-        if not audio_bytes:
-            logger.error("Voxtral TTS response missing audio payload")
-            return False
-
-        try:
-            samples, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
-            sd.play(samples, samplerate=sample_rate)
-            sd.wait()
-            logger.debug("Voxtral TTS playback complete for %d chars", len(text))
-            return True
-        except Exception as exc:
-            logger.error("Voxtral TTS playback error: %s", exc)
-            return False
+        """Synthesise and play *text* via Voxtral."""
+        logger.warning(
+            "Voxtral TTS not available on HF free tier, falling back to Kokoro"
+        )
+        return self._speak_kokoro(text, _DEFAULT_VOICE, 1.0)
 
     def synthesize_to_file(
         self,
@@ -237,20 +195,29 @@ class VoiceEngine:
 
         Returns the transcript string, or empty string on failure.
         """
-        if self._stt is None:
-            logger.warning("Voxtral client unavailable — cannot transcribe")
+        if not self._stt_ready:
             return ""
 
         try:
             audio_path = Path(audio_path)
             with audio_path.open("rb") as handle:
-                response = self._stt.audio.transcriptions.complete(
-                    model="voxtral-mini-latest",
-                    file={"content": handle, "file_name": audio_path.name},
+                response = requests.post(
+                    self._hf_url,
+                    headers=self._hf_headers,
+                    data=handle.read(),
+                    timeout=60,
                 )
-            text: str = response.text.strip()
-            logger.info("Transcribed %s: %d chars", Path(str(audio_path)).name, len(text))
-            return text
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict):
+                return str(payload.get("text", "")).strip()
+            if isinstance(payload, list):
+                if not payload:
+                    return ""
+                entry = payload[0]
+                if isinstance(entry, dict):
+                    return str(entry.get("text", "")).strip()
+            return ""
         except Exception as exc:
             logger.error("transcribe_file error: %s", exc)
             return ""
@@ -263,8 +230,8 @@ class VoiceEngine:
         if not _SOUNDDEVICE_AVAILABLE:
             logger.warning("sounddevice unavailable — cannot record")
             return ""
-        if self._stt is None:
-            logger.warning("Voxtral client unavailable — cannot transcribe recording")
+        if not self._stt_ready:
+            logger.warning("Voxtral STT unavailable — cannot transcribe recording")
             return ""
 
         logger.info("Recording %.1fs of audio at %dHz…", duration_seconds, _MIC_SAMPLE_RATE)
@@ -304,7 +271,7 @@ class VoiceEngine:
 
         Useful when audio is already in memory (e.g. from meeting recorder).
         """
-        if self._stt is None:
+        if not self._stt_ready:
             return ""
         if not _NUMPY_AVAILABLE or _np is None:
             logger.warning("numpy unavailable — cannot transcribe audio array")

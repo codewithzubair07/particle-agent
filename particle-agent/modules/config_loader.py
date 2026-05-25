@@ -103,7 +103,6 @@ _ENV_BINDINGS: dict[str, tuple[list[str], Any]] = {
     "EMAIL_PASSWORD": (["email", "password"], ""),
     "GEMINI_API_KEY": (["llm", "gemini_api_key"], ""),
     "HF_TOKEN": (["llm", "hf_token"], ""),
-    "MISTRAL_API_KEY": (["llm", "mistral_api_key"], ""),
     "OPENROUTER_API_KEY": (["llm", "openrouter_api_key"], ""),
     "GOOGLE_CALENDAR_CREDENTIALS": (["calendar", "credentials"], ""),
     "ELEVENLABS_API_KEY": (["voice", "elevenlabs_api_key"], ""),

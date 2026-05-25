@@ -83,7 +83,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     },
     "voice": {
         "enabled": True,
-        "whisper_model": "base",
+        "voice_engine": "kokoro",
     },
     "browser": {
         "enabled": False,
@@ -102,6 +102,7 @@ _ENV_BINDINGS: dict[str, tuple[list[str], Any]] = {
     "EMAIL_ADDRESS": (["email", "address"], ""),
     "EMAIL_PASSWORD": (["email", "password"], ""),
     "GEMINI_API_KEY": (["llm", "gemini_api_key"], ""),
+    "MISTRAL_API_KEY": (["llm", "mistral_api_key"], ""),
     "OPENROUTER_API_KEY": (["llm", "openrouter_api_key"], ""),
     "GOOGLE_CALENDAR_CREDENTIALS": (["calendar", "credentials"], ""),
 }

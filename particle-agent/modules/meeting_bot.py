@@ -3,7 +3,7 @@
 Uses Selenium to join Google Meet and Zoom meetings automatically:
   * Watches the calendar for upcoming meetings.
   * Joins the meeting URL a minute before it starts.
-  * Captures a transcript using Whisper in a background thread.
+  * Captures a transcript using Voxtral in a background thread.
   * Generates an LLM meeting summary when the meeting ends.
   * Posts the summary to Telegram.
 
@@ -53,7 +53,7 @@ except ImportError:
     _SD_AVAILABLE = False
 
 _CHUNK_SECONDS = 30   # seconds of audio per transcription chunk
-_MIC_RATE = 16000     # whisper expects 16kHz
+_MIC_RATE = 16000     # STT expects 16kHz
 
 # Allowed meeting provider hostnames (exact match against parsed URL host)
 _GOOGLE_MEET_HOST = "meet.google.com"

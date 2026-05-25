@@ -213,6 +213,7 @@ class MeetingBot:
     def _run_meeting(self, session: MeetingSession) -> None:
         driver = None
         audio_thread = None
+        clone_agent = None
 
         try:
             driver = self._build_driver()
@@ -220,12 +221,18 @@ class MeetingBot:
             logger.info("Joined meeting '%s'", session.title)
             self._notify(f"🤝 Joined meeting: *{session.title}*")
 
+            from modules.clone_agent import get_clone_agent
+
+            clone_agent = get_clone_agent()
+            if clone_agent.available:
+                clone_agent.start_face_clone()
+
             # Start audio capture in a background thread
             audio_queue: queue.Queue = queue.Queue()
             if _SD_AVAILABLE:
                 audio_thread = threading.Thread(
                     target=self._capture_audio,
-                    args=(session, audio_queue),
+                    args=(session, audio_queue, clone_agent),
                     daemon=True,
                     name=f"audio-{session.event_id[:8]}",
                 )
@@ -250,6 +257,8 @@ class MeetingBot:
                     pass
             if audio_thread:
                 audio_thread.join(timeout=5)
+            if clone_agent:
+                clone_agent.stop_face_clone()
 
         # Generate and send summary
         self._post_summary(session)
@@ -303,11 +312,19 @@ class MeetingBot:
     # Audio capture
     # ------------------------------------------------------------------
 
-    def _capture_audio(self, session: MeetingSession, q: "queue.Queue") -> None:
+    def _capture_audio(
+        self,
+        session: MeetingSession,
+        q: "queue.Queue",
+        clone_agent: object,
+    ) -> None:
         """Record audio in chunks and transcribe each one with Whisper."""
-        from modules.voice import get_voice_engine
+        use_clone_agent = bool(getattr(clone_agent, "available", False))
+        engine = None
+        if not use_clone_agent:
+            from modules.voice import get_voice_engine
 
-        engine = get_voice_engine()
+            engine = get_voice_engine()
         chunk_samples = _CHUNK_SECONDS * _MIC_RATE
 
         while session.is_running:
@@ -319,9 +336,15 @@ class MeetingBot:
                     dtype="float32",
                 )
                 sd.wait()
-                text = engine.transcribe_audio_array(audio.squeeze(), _MIC_RATE)
-                if text.strip():
-                    session.transcript_parts.append(text.strip())
+                if use_clone_agent:
+                    text = clone_agent.transcribe_array(audio.squeeze(), _MIC_RATE)
+                else:
+                    text = engine.transcribe_audio_array(audio.squeeze(), _MIC_RATE)
+                text = text.strip()
+                if text:
+                    session.transcript_parts.append(text)
+                    if use_clone_agent:
+                        clone_agent.respond_to(text, session.title)
                     logger.debug("Meeting transcript chunk (%d chars)", len(text))
             except Exception as exc:
                 logger.error("Audio capture error: %s", exc)

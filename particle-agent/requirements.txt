@@ -32,8 +32,8 @@ python-docx>=1.0
 APScheduler>=3.10
 
 # Voice — STT (cloud)
-mistralai>=1.12.0,<2.0
-requests>=2.31  # HF API (and general HTTP)
+# HF Inference API + ElevenLabs TTS (clone_agent) use requests
+requests>=2.31
 
 # Voice — TTS (cloud)
 # (ElevenLabs uses requests — no extra SDK required)

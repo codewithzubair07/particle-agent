@@ -3,17 +3,22 @@
 Uses Selenium to join Google Meet and Zoom meetings automatically:
   * Watches the calendar for upcoming meetings.
   * Joins the meeting URL a minute before it starts.
+  * Loads saved Google cookies so no CAPTCHA / robot check ever fires.
+  * Falls back to password login if cookies are missing or expired.
   * Captures a transcript using Voxtral in a background thread.
   * Generates an LLM meeting summary when the meeting ends.
   * Posts the summary to Telegram.
 
-Audio capture relies on the system's virtual audio loopback (e.g.
-PulseAudio loopback or BlackHole on macOS).  If audio capture fails,
-the module falls back to on-screen caption scraping from Google Meet.
+Cookie setup (one-time):
+  Run:  python setup_cookies.py
+  This opens Chrome, lets you sign in manually, then saves cookies to
+  data/google_cookies.json.  After that, meeting_bot.py loads them
+  automatically on every join — no password prompts, no CAPTCHA.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -47,24 +52,25 @@ except ImportError:
     logger.warning("selenium not installed — meeting bot unavailable")
 
 try:
-    import sounddevice as sd  # type: ignore
+    import sounddevice as sd
     _SD_AVAILABLE = True
 except ImportError:
     _SD_AVAILABLE = False
 
-_CHUNK_SECONDS = 30   # seconds of audio per transcription chunk
-_MIC_RATE = 16000     # STT expects 16kHz
+_CHUNK_SECONDS = 30
+_MIC_RATE = 16000
 
-# Allowed meeting provider hostnames (exact match against parsed URL host)
 _GOOGLE_MEET_HOST = "meet.google.com"
 _ZOOM_HOST = "zoom.us"
 
+# Where cookies are saved after setup_cookies.py is run
+_COOKIE_FILE = Path("data/google_cookies.json")
+
 
 def _url_host_is(url: str, expected_host: str) -> bool:
-    """Return True only when the parsed hostname exactly matches *expected_host*."""
     try:
         parsed = urlparse(url)
-        host = parsed.netloc.lower().split(":")[0]  # strip port if present
+        host = parsed.netloc.lower().split(":")[0]
         return host == expected_host or host.endswith("." + expected_host)
     except Exception:
         return False
@@ -72,8 +78,6 @@ def _url_host_is(url: str, expected_host: str) -> bool:
 
 @dataclass
 class MeetingSession:
-    """Holds the runtime state for a single ongoing meeting."""
-
     event_id: str
     title: str
     url: str
@@ -83,7 +87,7 @@ class MeetingSession:
 
 
 class MeetingBot:
-    """Selenium-powered meeting attendee with background transcription."""
+    """Selenium-powered meeting attendee with cookie-based Google auth."""
 
     def __init__(self) -> None:
         cfg = get_config()
@@ -93,16 +97,22 @@ class MeetingBot:
         self._running = False
         self._watcher_thread: Optional[threading.Thread] = None
 
+        # Fallback password credentials (only used if cookies missing/expired)
+        self._google_email = str(getattr(cfg.meeting_bot, "google_email", ""))
+        self._google_password = str(getattr(cfg.meeting_bot, "google_password", ""))
+
+        # Cookie file path (can be overridden in config)
+        cookie_path = str(getattr(cfg.meeting_bot, "cookie_file", str(_COOKIE_FILE)))
+        self._cookie_file = Path(cookie_path)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def set_telegram_notifier(self, fn: callable) -> None:
-        """Inject a callable(message: str) for Telegram notifications."""
         self._send_telegram = fn
 
     def start(self) -> None:
-        """Start the meeting watcher daemon thread."""
         self._running = True
         self._watcher_thread = threading.Thread(
             target=self._watch_calendar, daemon=True, name="meeting-watcher"
@@ -111,7 +121,6 @@ class MeetingBot:
         logger.info("MeetingBot watcher started")
 
     def stop(self) -> None:
-        """Stop the meeting watcher and all active sessions."""
         self._running = False
         with self._lock:
             for session in self._active_sessions.values():
@@ -119,7 +128,6 @@ class MeetingBot:
         logger.info("MeetingBot stopped")
 
     def join_meeting(self, event_id: str, title: str, url: str) -> bool:
-        """Manually join a meeting URL; returns True on success."""
         if not _SELENIUM_AVAILABLE:
             logger.error("Selenium unavailable — cannot join meeting")
             return False
@@ -146,7 +154,6 @@ class MeetingBot:
     # ------------------------------------------------------------------
 
     def _watch_calendar(self) -> None:
-        """Poll calendar every minute; auto-join events that are starting soon."""
         while self._running:
             try:
                 self._check_upcoming_meetings()
@@ -182,22 +189,18 @@ class MeetingBot:
                 continue
 
             if abs((start_dt - now).total_seconds()) <= join_window.total_seconds():
-                # Find a meeting URL in the event
                 url = self._extract_meeting_url(event)
                 if url:
                     title = event.get("summary", "Meeting")
                     self.join_meeting(event_id, title, url)
 
     def _extract_meeting_url(self, event: dict) -> Optional[str]:
-        """Extract a Google Meet or Zoom URL from a calendar event."""
-        # Google Meet link
         conf = event.get("conferenceData", {})
         entry_points = conf.get("entryPoints", [])
         for ep in entry_points:
             if ep.get("entryPointType") == "video":
                 return ep.get("uri")
 
-        # Fallback: search description / location for URL patterns
         for field_name in ("description", "location"):
             text = event.get(field_name, "") or ""
             for token in text.split():
@@ -207,7 +210,7 @@ class MeetingBot:
         return None
 
     # ------------------------------------------------------------------
-    # Meeting runner (per-session thread)
+    # Meeting runner
     # ------------------------------------------------------------------
 
     def _run_meeting(self, session: MeetingSession) -> None:
@@ -217,22 +220,25 @@ class MeetingBot:
 
         try:
             driver = self._build_driver()
+
+            # Sign in with credentials directly
+            self._sign_in_google(driver)
+
             self._notify(
-                f"📅 *Joining meeting:* {session.title}\n"
+                f"Joining meeting: {session.title}\n"
                 f"URL: {session.url}\n\n"
                 "Particle is now attending this meeting on your behalf."
             )
+
             self._join_url(driver, session.url)
             logger.info("Joined meeting '%s'", session.title)
-            self._notify(f"🤝 Joined meeting: *{session.title}*")
+            self._notify(f"Joined meeting: {session.title}")
 
             from modules.clone_agent import get_clone_agent
-
             clone_agent = get_clone_agent()
             if clone_agent.available:
                 clone_agent.start_face_clone()
 
-            # Start audio capture in a background thread
             audio_queue: queue.Queue = queue.Queue()
             if _SD_AVAILABLE:
                 audio_thread = threading.Thread(
@@ -243,7 +249,6 @@ class MeetingBot:
                 )
                 audio_thread.start()
 
-            # Wait for meeting to end (check every 30s whether the tab still has the meeting)
             while session.is_running:
                 time.sleep(30)
                 if not self._is_meeting_active(driver, session.url):
@@ -265,34 +270,44 @@ class MeetingBot:
             if clone_agent:
                 clone_agent.stop_face_clone()
 
-        # Generate and send summary
         self._post_summary(session)
         with self._lock:
             self._active_sessions.pop(session.event_id, None)
 
     def _join_url(self, driver, url: str) -> None:
-        """Navigate to a meeting URL and attempt to dismiss consent dialogs."""
+        if not url.startswith("http"):
+            url = "https://" + url
         driver.get(url)
-        time.sleep(3)
+        time.sleep(5)
 
-        # Google Meet: click 'Join now' / 'Ask to join'
         if _url_host_is(url, _GOOGLE_MEET_HOST):
+            # Handle "Continue as [name]" account picker if it appears
+            self._handle_account_picker(driver)
+
+            # Mute mic and turn off camera before joining
+            self._mute_before_join(driver)
+
             for selector in [
                 "//button[contains(., 'Join now')]",
                 "//button[contains(., 'Ask to join')]",
+                "//button[contains(., 'Join')]",
                 "//button[contains(@data-idom-class, 'join')]",
             ]:
                 try:
-                    btn = WebDriverWait(driver, 5).until(
+                    btn = WebDriverWait(driver, 8).until(
                         EC.element_to_be_clickable((By.XPATH, selector))
                     )
                     btn.click()
-                    logger.debug("Clicked '%s' button for Google Meet", selector)
+                    logger.info("Clicked join button for Google Meet")
+                    time.sleep(3)
                     break
                 except Exception:
                     continue
 
-        # Zoom: handle browser-based join
+            # Mute again after joining in case it got re-enabled
+            time.sleep(2)
+            self._mute_after_join(driver)
+
         if _url_host_is(url, _ZOOM_HOST):
             try:
                 driver.get(url.replace("/j/", "/wc/join/"))
@@ -301,10 +316,8 @@ class MeetingBot:
                 pass
 
     def _is_meeting_active(self, driver, url: str) -> bool:
-        """Return True while a meeting tab is still showing meeting content."""
         try:
             current_url = driver.current_url
-            # If navigated away from the meeting domain the meeting has ended
             if _url_host_is(url, _GOOGLE_MEET_HOST) and not _url_host_is(current_url, _GOOGLE_MEET_HOST):
                 return False
             if _url_host_is(url, _ZOOM_HOST) and not _url_host_is(current_url, _ZOOM_HOST):
@@ -320,8 +333,156 @@ class MeetingBot:
             return False
 
     # ------------------------------------------------------------------
-    # Audio capture
+    # Cookie-based auth (primary method — no CAPTCHA)
     # ------------------------------------------------------------------
+
+    def _load_cookies(self, driver) -> bool:
+        """Load saved Google cookies into Chrome."""
+        if not self._cookie_file.exists():
+            logger.info(
+                "No cookie file at %s — run: python setup_cookies.py",
+                self._cookie_file,
+            )
+            return False
+
+        try:
+            cookies = json.loads(self._cookie_file.read_text(encoding="utf-8"))
+            if not cookies:
+                return False
+
+            driver.get("https://google.com")
+            time.sleep(2)
+
+            for cookie in cookies:
+                cookie.pop("sameSite", None)
+                cookie.pop("expiry", None)
+                try:
+                    driver.add_cookie(cookie)
+                except Exception:
+                    pass
+
+            logger.info("Loaded %d cookies — going straight to Meet", len(cookies))
+            return True
+
+        except Exception as exc:
+            logger.warning("Failed to load cookies: %s", exc)
+            return False
+
+    def _save_cookies(self, driver) -> None:
+        """Save current Chrome cookies to file for reuse next time."""
+        try:
+            driver.get("https://accounts.google.com")
+            time.sleep(2)
+            cookies = driver.get_cookies()
+            self._cookie_file.parent.mkdir(parents=True, exist_ok=True)
+            self._cookie_file.write_text(
+                json.dumps(cookies, indent=2), encoding="utf-8"
+            )
+            logger.info("Saved %d cookies to %s", len(cookies), self._cookie_file)
+        except Exception as exc:
+            logger.warning("Could not save cookies: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Password login (fallback only — used when cookies missing/expired)
+    # ------------------------------------------------------------------
+
+    def _sign_in_google(self, driver) -> bool:
+        """Sign in to Google using keyboard input — more reliable than button clicks."""
+        if not self._google_email or not self._google_password:
+            logger.warning("No Google credentials — set GOOGLE_MEET_EMAIL/PASSWORD in .env")
+            return False
+
+        logger.info("Signing in as %s", self._google_email)
+        try:
+            from selenium.webdriver.common.keys import Keys
+            driver.get("https://accounts.google.com/signin")
+            wait = WebDriverWait(driver, 30)
+
+            # Enter email and press Enter
+            email_field = wait.until(
+                EC.presence_of_element_located((By.ID, "identifierId"))
+            )
+            time.sleep(1)
+            email_field.click()
+            email_field.clear()
+            email_field.send_keys(self._google_email)
+            email_field.send_keys(Keys.RETURN)
+            time.sleep(4)
+
+            # Enter password and press Enter
+            password_field = wait.until(
+                EC.presence_of_element_located((By.NAME, "Passwd"))
+            )
+            time.sleep(1)
+            password_field.click()
+            password_field.clear()
+            password_field.send_keys(self._google_password)
+            password_field.send_keys(Keys.RETURN)
+            time.sleep(6)
+
+            current = driver.current_url
+            logger.info("After sign-in URL: %s", current[:80])
+
+            if ("accounts.google.com/signin" not in current and
+                    "accounts.google.com/v3/signin" not in current):
+                logger.info("Signed in successfully as %s", self._google_email)
+                return True
+
+            logger.warning("Sign-in may have failed — URL: %s", current[:80])
+            return False
+
+        except Exception as exc:
+            logger.warning("Sign-in failed: %s", exc)
+            return False
+
+    def _handle_account_picker(self, driver) -> None:
+        """Click through any 'Continue as [name]' account picker screens."""
+        try:
+            # Wait a moment for the popup to appear
+            time.sleep(2)
+            wait = WebDriverWait(driver, 8)
+
+            for selector in [
+                "//button[contains(., 'Continue as')]",
+                "//a[contains(., 'Continue as')]",
+                "//button[contains(@aria-label, 'Continue as')]",
+                "//div[contains(., 'Continue as')]//button",
+                "//button[contains(., 'Continue')]",
+                # Chrome's signin popup dismiss buttons
+                "//button[contains(., 'No thanks')]",
+                "//button[contains(., 'No, thanks')]",
+                "//button[contains(., 'Cancel')]",
+            ]:
+                try:
+                    btn = wait.until(EC.element_to_be_clickable((By.XPATH, selector)))
+                    btn.click()
+                    logger.info("Clicked account picker: %s", selector)
+                    time.sleep(2)
+                    return
+                except Exception:
+                    continue
+
+            # Also try dismissing via JavaScript if buttons not clickable
+            try:
+                driver.execute_script("""
+                    var buttons = document.querySelectorAll('button');
+                    for (var b of buttons) {
+                        if (b.innerText && (
+                            b.innerText.includes('Continue as') ||
+                            b.innerText.includes('No thanks')
+                        )) {
+                            b.click();
+                            break;
+                        }
+                    }
+                """)
+                logger.info("Dismissed account picker via JavaScript")
+                time.sleep(2)
+            except Exception:
+                pass
+
+        except Exception as exc:
+            logger.debug("Account picker handler: %s", exc)
 
     def _capture_audio(
         self,
@@ -329,12 +490,10 @@ class MeetingBot:
         q: "queue.Queue",
         clone_agent: object,
     ) -> None:
-        """Record audio in chunks and transcribe each one with Whisper."""
         use_clone_agent = bool(getattr(clone_agent, "available", False))
         engine = None
         if not use_clone_agent:
             from modules.voice import get_voice_engine
-
             engine = get_voice_engine()
         chunk_samples = _CHUNK_SECONDS * _MIC_RATE
 
@@ -376,26 +535,23 @@ class MeetingBot:
         duration = int((datetime.now(timezone.utc) - session.started_at).total_seconds() / 60)
 
         if not transcript:
-            msg = (
-                f"📋 *Meeting ended:* {session.title}\n"
+            self._notify(
+                f"Meeting ended: {session.title}\n"
                 f"Duration: ~{duration} min\n"
-                "_No transcript captured._"
+                "No transcript captured."
             )
-            self._notify(msg)
             return
 
-        logger.info("Generating summary for meeting '%s' (%d chars transcript)", session.title, len(transcript))
+        logger.info("Generating summary for '%s'", session.title)
         summary = self._summarise(transcript, session.title)
-        msg = (
-            f"📋 *Meeting Summary:* {session.title}\n"
+        self._notify(
+            f"Meeting Summary: {session.title}\n"
             f"Duration: ~{duration} min\n\n"
             f"{summary}"
         )
-        self._notify(msg)
 
     def _summarise(self, transcript: str, title: str) -> str:
         from modules.llm_router import complete
-
         prompt = (
             f"Summarise the following meeting transcript for '{title}'. "
             "Highlight: key decisions, action items, and important topics discussed.\n\n"
@@ -405,32 +561,157 @@ class MeetingBot:
             return complete(prompt)
         except Exception as exc:
             logger.error("Meeting summary LLM error: %s", exc)
-            return "_Summary generation failed._"
+            return "Summary generation failed."
 
     # ------------------------------------------------------------------
-    # Selenium driver factory
+    # Chrome driver
     # ------------------------------------------------------------------
 
     def _build_driver(self):
-        """Build a headless Chrome WebDriver with microphone/camera permissions."""
-        options = ChromeOptions()
-        options.add_argument("--window-size=1280,720")
-        options.add_argument("--start-minimized")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--use-fake-ui-for-media-stream")
-        options.add_argument("--use-fake-device-for-media-stream")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
-        from webdriver_manager.chrome import ChromeDriverManager
+        """Build Chrome using undetected-chromedriver so Google doesn't block it."""
+        tmp_profile = tempfile.mkdtemp(prefix="particle_chrome_")
+
         try:
-            driver = webdriver.Chrome(options=options)
-        except Exception:
+            import undetected_chromedriver as uc
+            options = uc.ChromeOptions()
+            options.add_argument(f"--user-data-dir={tmp_profile}")
+            options.add_argument("--window-size=1280,720")
+            options.add_argument("--use-fake-ui-for-media-stream")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_experimental_option("prefs", {
+                "profile.default_content_setting_values.media_stream_mic": 1,
+                "profile.default_content_setting_values.media_stream_camera": 1,
+                "profile.default_content_setting_values.notifications": 1,
+            })
+            driver = uc.Chrome(options=options, headless=False, version_main=148)
+            logger.info("Chrome started via undetected-chromedriver")
+        except ImportError:
+            # Fallback to regular selenium if undetected-chromedriver not installed
+            logger.warning(
+                "undetected-chromedriver not installed — falling back to selenium. "
+                "Run: pip install undetected-chromedriver"
+            )
+            from webdriver_manager.chrome import ChromeDriverManager
+            options = ChromeOptions()
+            options.add_argument(f"--user-data-dir={tmp_profile}")
+            options.add_argument("--window-size=1280,720")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_argument("--use-fake-ui-for-media-stream")
+            options.add_experimental_option("prefs", {
+                "profile.default_content_setting_values.media_stream_mic": 1,
+                "profile.default_content_setting_values.media_stream_camera": 1,
+                "profile.default_content_setting_values.notifications": 1,
+            })
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option("useAutomationExtension", False)
             service = ChromeService(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
+
         driver.set_page_load_timeout(30)
+        driver.implicitly_wait(10)
         return driver
+
+    # ------------------------------------------------------------------
+    # Mute mic and camera
+    # ------------------------------------------------------------------
+
+    def _mute_before_join(self, driver) -> None:
+        """Mute mic and turn off camera on the pre-join lobby screen."""
+        from selenium.webdriver.common.keys import Keys
+        try:
+            # Click mic button if it shows as enabled (not already muted)
+            mic_selectors = [
+                "//div[@data-is-muted='false' and @data-tooltip and contains(@data-tooltip, 'mic')]",
+                "//button[@data-is-muted='false' and contains(@aria-label, 'microphone')]",
+                "//button[contains(@aria-label, 'Turn off microphone')]",
+                "//button[contains(@aria-label, 'Mute microphone')]",
+            ]
+            for sel in mic_selectors:
+                try:
+                    btn = driver.find_element(By.XPATH, sel)
+                    btn.click()
+                    logger.info("Mic muted on lobby")
+                    time.sleep(0.5)
+                    break
+                except Exception:
+                    continue
+
+            # Turn off camera
+            cam_selectors = [
+                "//button[contains(@aria-label, 'Turn off camera')]",
+                "//button[contains(@aria-label, 'Stop camera')]",
+                "//div[@data-is-muted='false' and contains(@data-tooltip, 'camera')]",
+            ]
+            for sel in cam_selectors:
+                try:
+                    btn = driver.find_element(By.XPATH, sel)
+                    btn.click()
+                    logger.info("Camera off on lobby")
+                    time.sleep(0.5)
+                    break
+                except Exception:
+                    continue
+
+        except Exception as exc:
+            logger.debug("Pre-join mute error (non-fatal): %s", exc)
+
+    def _mute_after_join(self, driver) -> None:
+        """Ensure mic and camera are off after joining the meeting."""
+        from selenium.webdriver.common.keys import Keys
+        try:
+            time.sleep(2)
+
+            # Use keyboard shortcuts — most reliable method
+            # Ctrl+D = toggle mic, Ctrl+E = toggle camera in Google Meet
+            from selenium.webdriver.common.action_chains import ActionChains
+            actions = ActionChains(driver)
+
+            # Focus the page first
+            driver.find_element(By.TAG_NAME, "body").click()
+            time.sleep(0.5)
+
+            # Mute mic with Ctrl+D
+            actions.key_down(Keys.CONTROL).send_keys("d").key_up(Keys.CONTROL).perform()
+            time.sleep(0.5)
+            logger.info("Sent Ctrl+D to mute mic")
+
+            # Turn off camera with Ctrl+E
+            actions = ActionChains(driver)
+            actions.key_down(Keys.CONTROL).send_keys("e").key_up(Keys.CONTROL).perform()
+            time.sleep(0.5)
+            logger.info("Sent Ctrl+E to turn off camera")
+
+            # Also try clicking mute buttons as backup
+            for aria in ["Turn off microphone", "Mute microphone", "Mute mic"]:
+                try:
+                    btn = driver.find_element(
+                        By.XPATH, f"//button[contains(@aria-label, '{aria}')]"
+                    )
+                    btn.click()
+                    logger.info("Clicked mute button: %s", aria)
+                    break
+                except Exception:
+                    continue
+
+            for aria in ["Turn off camera", "Stop camera"]:
+                try:
+                    btn = driver.find_element(
+                        By.XPATH, f"//button[contains(@aria-label, '{aria}')]"
+                    )
+                    btn.click()
+                    logger.info("Clicked camera off button: %s", aria)
+                    break
+                except Exception:
+                    continue
+
+            logger.info("Mic and camera muted after joining")
+
+        except Exception as exc:
+            logger.debug("Post-join mute error (non-fatal): %s", exc)
 
     # ------------------------------------------------------------------
     # Notifications
@@ -455,7 +736,6 @@ _singleton_lock = threading.Lock()
 
 
 def get_meeting_bot() -> MeetingBot:
-    """Return the module-level :class:`MeetingBot` singleton."""
     global _instance
     with _singleton_lock:
         if _instance is None:

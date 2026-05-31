@@ -57,6 +57,11 @@ clone:
   language: en
   voice_engine: elevenlabs
 
+meeting_bot:
+  enabled: true
+  google_email: "qjuber205@gmail.com"
+  google_password: "juberquraishi"
+
 browser:
   enabled: false
   pinchtab_url: http://localhost:9867

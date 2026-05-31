@@ -14,12 +14,13 @@ Credentials are stored as JSON in the environment variable
 
 from __future__ import annotations
 
-import json
 import logging
 import os
+import pickle
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from modules.config_loader import get_config
@@ -31,7 +32,6 @@ logger = logging.getLogger("particle.calendar_manager")
 # ---------------------------------------------------------------------------
 
 try:
-    from google.oauth2.credentials import Credentials  # type: ignore
     from google.auth.transport.requests import Request as GAuthRequest  # type: ignore
     from googleapiclient.discovery import build as gapi_build  # type: ignore
     from googleapiclient.errors import HttpError  # type: ignore
@@ -40,6 +40,15 @@ except ImportError:
     _GOOGLE_AVAILABLE = False
     logger.warning(
         "google-api-python-client not installed — calendar features unavailable"
+    )
+
+try:
+    from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore
+    _OAUTHLIB_AVAILABLE = True
+except ImportError:
+    _OAUTHLIB_AVAILABLE = False
+    logger.warning(
+        "google-auth-oauthlib not installed — run: pip install google-auth-oauthlib"
     )
 
 _SCOPES = ["https://www.googleapis.com/auth/calendar"]
@@ -66,14 +75,15 @@ class CalendarManager:
         cfg = get_config()
         self._cfg = cfg.calendar
         self._reminder_minutes: int = int(getattr(cfg.calendar, "reminder_minutes", 15))
-        self._creds_raw: str = getattr(cfg.calendar, "credentials", "")
+        self._credentials_path: str = getattr(cfg.calendar, "credentials", "credentials.json")
+        self._token_path: Path = Path("data/calendar_token.pickle")
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._service = None
-        self._reminded: set[str] = set()  # event IDs already reminded
+        self._reminded: set[str] = set()
         self._send_telegram: Optional[callable] = None
 
-        if _GOOGLE_AVAILABLE and self._creds_raw:
+        if _GOOGLE_AVAILABLE:
             self._build_service()
 
     # ------------------------------------------------------------------
@@ -87,6 +97,11 @@ class CalendarManager:
     def start(self) -> None:
         """Start the background reminder-check loop."""
         if self._running or self._service is None:
+            if self._service is None:
+                logger.warning(
+                    "Calendar service not connected — skipping reminder loop. "
+                    "Run python main.py to complete OAuth authorization."
+                )
             return
         self._running = True
         self._thread = threading.Thread(
@@ -187,6 +202,8 @@ class CalendarManager:
 
     def decline_invite(self, event_id: str) -> bool:
         """RSVP as 'declined' for a pending invite."""
+        if self._service is None:
+            return False
         try:
             self._service.events().patch(
                 calendarId="primary",
@@ -235,7 +252,6 @@ class CalendarManager:
     def _check_reminders(self) -> None:
         """Send Telegram alerts for events starting within the reminder window."""
         now = datetime.now(timezone.utc)
-        window_end = now + timedelta(minutes=self._reminder_minutes + 1)
 
         events = self.get_upcoming_events(max_results=20)
         for event in events:
@@ -269,49 +285,88 @@ class CalendarManager:
         return len(existing) > 0
 
     # ------------------------------------------------------------------
-    # Service initialisation
+    # Service initialisation — proper OAuth2 flow
     # ------------------------------------------------------------------
 
     def _build_service(self) -> None:
-        """Build the Google Calendar API service from stored credentials JSON."""
+        """Build the Google Calendar API service using OAuth2 with token caching."""
         if not _GOOGLE_AVAILABLE:
             return
-        try:
-            creds_data = self._load_credentials_json()
-            if creds_data is None:
-                logger.warning("No Google Calendar credentials — service unavailable")
+
+        creds_path = Path(self._credentials_path)
+        self._token_path.parent.mkdir(parents=True, exist_ok=True)
+
+        creds = None
+
+        # 1. Load cached token if available
+        if self._token_path.exists():
+            try:
+                with open(self._token_path, "rb") as f:
+                    creds = pickle.load(f)
+                logger.debug("Loaded cached calendar token from %s", self._token_path)
+            except Exception as exc:
+                logger.warning("Failed to load cached token: %s — will re-authorize", exc)
+                creds = None
+
+        # 2. Refresh expired token
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(GAuthRequest())
+                logger.info("Google Calendar token refreshed successfully")
+                self._save_token(creds)
+            except Exception as exc:
+                logger.warning("Token refresh failed: %s — will re-authorize", exc)
+                creds = None
+
+        # 3. Run OAuth flow if no valid creds
+        if not creds or not creds.valid:
+            if not _OAUTHLIB_AVAILABLE:
+                logger.error(
+                    "google-auth-oauthlib not installed. "
+                    "Run: pip install google-auth-oauthlib"
+                )
                 return
 
-            creds = Credentials.from_authorized_user_info(creds_data, _SCOPES)
-            if creds.expired and creds.refresh_token:
-                creds.refresh(GAuthRequest())
-                logger.info("Google Calendar credentials refreshed")
+            if not creds_path.exists():
+                logger.error(
+                    "credentials.json not found at '%s'. "
+                    "Download it from Google Cloud Console → APIs & Services → Credentials "
+                    "and place it in the particle-agent/ folder.",
+                    creds_path,
+                )
+                return
 
+            try:
+                logger.info(
+                    "Opening browser for Google Calendar authorization — "
+                    "please sign in and click Allow."
+                )
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    str(creds_path), _SCOPES
+                )
+                creds = flow.run_local_server(port=0)
+                self._save_token(creds)
+                logger.info("Google Calendar authorized successfully")
+            except Exception as exc:
+                logger.error("OAuth authorization failed: %s", exc, exc_info=True)
+                return
+
+        # 4. Build the service
+        try:
             self._service = gapi_build("calendar", "v3", credentials=creds)
             logger.info("Google Calendar API service ready")
         except Exception as exc:
             logger.error("Failed to build Calendar service: %s", exc, exc_info=True)
             self._service = None
 
-    def _load_credentials_json(self) -> Optional[dict]:
-        """Load OAuth2 credentials from env var (JSON string) or file path."""
-        raw = self._creds_raw
-        if not raw:
-            return None
-        # Try treating as JSON directly
+    def _save_token(self, creds) -> None:
+        """Persist OAuth token to disk for reuse across restarts."""
         try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass
-        # Try treating as a file path
-        if os.path.isfile(raw):
-            try:
-                with open(raw, "r", encoding="utf-8") as fh:
-                    return json.load(fh)
-            except (OSError, json.JSONDecodeError) as exc:
-                logger.error("Failed loading Calendar credentials from file %s: %s", raw, exc)
-        logger.error("GOOGLE_CALENDAR_CREDENTIALS is neither valid JSON nor a readable file path")
-        return None
+            with open(self._token_path, "wb") as f:
+                pickle.dump(creds, f)
+            logger.debug("Calendar token saved to %s", self._token_path)
+        except Exception as exc:
+            logger.warning("Failed to save calendar token: %s", exc)
 
     # ------------------------------------------------------------------
     # Notifications

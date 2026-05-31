@@ -162,7 +162,14 @@ class EmailManager:
                 self._notify(alert)
 
             if cat == "spam":
-                self._attempt_unsubscribe(msg)
+                # FIXED: Don't auto-unsubscribe. Instead, notify user and wait for confirmation
+                alert = (
+                    f"📧 *Spam detected*\n"
+                    f"From: {msg['from']}\n"
+                    f"Subject: {msg['subject']}\n\n"
+                    f"Reply with `/unsubscribe {msg['uid']}` to unsubscribe from this sender"
+                )
+                self._notify(alert)
 
     # ------------------------------------------------------------------
     # IMAP helpers
@@ -286,17 +293,27 @@ class EmailManager:
             logger.error("LLM draft_reply failed: %s", exc)
             return ""
 
-    def _attempt_unsubscribe(self, msg: dict) -> None:
-        """Send a brief unsubscribe request reply for a spam message."""
+    def unsubscribe_from_sender(self, msg: dict) -> None:
+        """Send an unsubscribe request for a spam message (user-initiated only)."""
         reply_body = "Please unsubscribe me from this mailing list. Thank you."
         to_addr = msg["from"]
         # Extract bare email address
         if "<" in to_addr:
             to_addr = to_addr.split("<")[1].rstrip(">")
+        
+        # Skip no-reply addresses
+        if "noreply" in to_addr.lower() or "no-reply" in to_addr.lower():
+            logger.info("Skipping unsubscribe for no-reply sender: %s (subject: %s)", to_addr, msg["subject"])
+            return
+        
         subject = f"Re: {msg['subject']}"
         sent = self.send_email(to_addr, subject, reply_body)
         if sent:
-            logger.info("Unsubscribe sent to %s", to_addr)
+            logger.info("Unsubscribe reply sent to %s", to_addr)
+            self._notify(f"✅ Unsubscribed from {to_addr}")
+        else:
+            logger.error("Failed to unsubscribe from %s", to_addr)
+            self._notify(f"❌ Failed to unsubscribe from {to_addr}")
 
     # ------------------------------------------------------------------
     # Notifications

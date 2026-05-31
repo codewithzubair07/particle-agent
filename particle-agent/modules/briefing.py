@@ -65,6 +65,17 @@ def _weather_description(code: int) -> str:
     return _WMO_CODES.get(code, f"Weather code {code}")
 
 
+def _get_greeting() -> str:
+    """Return a time-aware greeting based on current UTC hour."""
+    hour = datetime.now(timezone.utc).hour
+    if hour < 12:
+        return "Good morning"
+    elif hour < 17:
+        return "Good afternoon"
+    else:
+        return "Good evening"
+
+
 class BriefingManager:
     """Scheduler and composer for the daily Particle briefing."""
 
@@ -98,7 +109,7 @@ class BriefingManager:
             self.trigger_now,
             trigger=CronTrigger(hour=self._digest_hour, minute=0, timezone="UTC"),
             id="daily_briefing",
-            name="Daily morning briefing",
+            name="Daily briefing",
             replace_existing=True,
         )
         self._scheduler.start()  # type: ignore[union-attr]
@@ -129,8 +140,9 @@ class BriefingManager:
 
     def _compose(self) -> str:
         now = datetime.now(timezone.utc)
+        greeting = _get_greeting()
         sections: list[str] = [
-            f"🌅 *Good morning!*  {now.strftime('%A, %d %B %Y')}",
+            f"🌅 *{greeting}!*  {now.strftime('%A, %d %B %Y')}",
             "",
         ]
 
@@ -255,15 +267,17 @@ class BriefingManager:
             em = get_email_manager()
             messages = em._fetch_unread()  # noqa: SLF001 — intentional internal access
             if not messages:
-                return "📧 *Email:* Inbox is clear."
+                return "📬 *Email:* Inbox is clear."
 
             total = len(messages)
             urgent = [m for m in messages if m["category"] == "urgent"]
-            lines = [f"📧 *Email:* {total} unread"]
+            lines = [f"📬 *Email:* {total} unread"]
             if urgent:
                 lines.append("  🚨 Urgent:")
                 for m in urgent[:3]:
-                    lines.append(f"    • {m['from'][:30]} — {m['subject'][:40]}")
+                    sender = m['from'][:30].encode("ascii", "replace").decode("ascii")
+                    subject = m['subject'][:40].encode("ascii", "replace").decode("ascii")
+                    lines.append(f"    • {sender} — {subject}")
             return "\n".join(lines)
         except Exception as exc:
             logger.warning("Email section error: %s", exc)
@@ -275,7 +289,7 @@ class BriefingManager:
 
             context = "\n".join(sections)
             prompt = (
-                "Based on this morning briefing, write one short (2-3 sentence) "
+                "Based on this briefing, write one short (2-3 sentence) "
                 "motivational or productivity tip for the day.\n\n"
                 f"Briefing:\n{context[:1500]}"
             )

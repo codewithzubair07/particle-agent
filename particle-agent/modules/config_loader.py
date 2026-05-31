@@ -28,14 +28,12 @@ class ConfigNamespace(dict):
     """Dictionary-like config object with recursive attribute access."""
 
     def __getattr__(self, name: str) -> Any:
-        """Return a key as an attribute when available."""
         try:
             return self[name]
         except KeyError as exc:
             raise AttributeError(name) from exc
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Allow attribute assignment to map to dictionary keys."""
         self[name] = value
 
 
@@ -65,10 +63,15 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         ],
         "max_retries_per_provider": 3,
         "request_timeout_seconds": 45,
+        "hf_token": "",
+        "gemini_api_key": "",
+        "openrouter_api_key": "",
     },
     "telegram": {
         "enabled": True,
         "default_status": "available",
+        "bot_token": "",
+        "home_id": "",
     },
     "email": {
         "imap_host": "imap.gmail.com",
@@ -76,14 +79,33 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "smtp_host": "smtp.gmail.com",
         "smtp_port": 587,
         "digest_hour": 9,
+        "address": "",
+        "password": "",
     },
     "calendar": {
         "enabled": True,
         "reminder_minutes": 15,
+        "credentials": "",
     },
     "voice": {
         "enabled": True,
         "voice_engine": "kokoro",
+        "elevenlabs_api_key": "",
+        "elevenlabs_voice_id": "",
+    },
+    "clone": {
+        "enabled": False,
+        "voice_sample": "assets/my_voice.wav",
+        "face_photo": "assets/my_face.jpg",
+        "deep_live_cam_dir": "Deep-Live-Cam",
+        "execution_provider": "cpu",
+        "language": "en",
+        "voice_engine": "elevenlabs",
+    },
+    "meeting_bot": {
+        "enabled": True,
+        "google_email": "",
+        "google_password": "",
     },
     "browser": {
         "enabled": False,
@@ -96,17 +118,19 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 _ENV_BINDINGS: dict[str, tuple[list[str], Any]] = {
-    "APP_ENVIRONMENT": (["app", "environment"], "development"),
-    "TELEGRAM_BOT_TOKEN": (["telegram", "bot_token"], ""),
-    "TELEGRAM_HOME_ID": (["telegram", "home_id"], ""),
-    "EMAIL_ADDRESS": (["email", "address"], ""),
-    "EMAIL_PASSWORD": (["email", "password"], ""),
-    "GEMINI_API_KEY": (["llm", "gemini_api_key"], ""),
-    "HF_TOKEN": (["llm", "hf_token"], ""),
-    "OPENROUTER_API_KEY": (["llm", "openrouter_api_key"], ""),
-    "GOOGLE_CALENDAR_CREDENTIALS": (["calendar", "credentials"], ""),
-    "ELEVENLABS_API_KEY": (["voice", "elevenlabs_api_key"], ""),
-    "ELEVENLABS_VOICE_ID": (["voice", "elevenlabs_voice_id"], ""),
+    "APP_ENVIRONMENT":              (["app", "environment"], "development"),
+    "TELEGRAM_BOT_TOKEN":           (["telegram", "bot_token"], ""),
+    "TELEGRAM_HOME_ID":             (["telegram", "home_id"], ""),
+    "GEMINI_API_KEY":               (["llm", "gemini_api_key"], ""),
+    "HF_TOKEN":                     (["llm", "hf_token"], ""),
+    "OPENROUTER_API_KEY":           (["llm", "openrouter_api_key"], ""),
+    "GOOGLE_CALENDAR_CREDENTIALS":  (["calendar", "credentials"], ""),
+    "ELEVENLABS_API_KEY":           (["voice", "elevenlabs_api_key"], ""),
+    "ELEVENLABS_VOICE_ID":          (["voice", "elevenlabs_voice_id"], ""),
+    "EMAIL_ADDRESS":                (["email", "address"], ""),
+    "EMAIL_PASSWORD":               (["email", "password"], ""),
+    "GOOGLE_MEET_EMAIL":            (["meeting_bot", "google_email"], ""),
+    "GOOGLE_MEET_PASSWORD":         (["meeting_bot", "google_password"], ""),
 }
 
 _SENSITIVE_MARKERS = ("key", "token", "secret", "password", "credentials")
@@ -116,7 +140,6 @@ _CONFIG_LOCK = threading.Lock()
 
 
 def _deep_merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
-    """Merge ``updates`` into ``base`` recursively and return ``base``."""
     for key, value in updates.items():
         if isinstance(base.get(key), dict) and isinstance(value, dict):
             _deep_merge(base[key], value)
@@ -126,7 +149,6 @@ def _deep_merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]
 
 
 def _set_nested(config: dict[str, Any], path: list[str], value: Any) -> None:
-    """Set a value in a nested dictionary path, creating nodes when missing."""
     node = config
     for key in path[:-1]:
         node = node.setdefault(key, {})
@@ -134,7 +156,6 @@ def _set_nested(config: dict[str, Any], path: list[str], value: Any) -> None:
 
 
 def _to_namespace(value: Any) -> Any:
-    """Recursively convert dictionaries into :class:`ConfigNamespace` objects."""
     if isinstance(value, dict):
         return ConfigNamespace({k: _to_namespace(v) for k, v in value.items()})
     if isinstance(value, list):
@@ -143,7 +164,6 @@ def _to_namespace(value: Any) -> Any:
 
 
 def _mask_value(key: str, value: Any) -> Any:
-    """Mask sensitive values before writing them to logs."""
     lowered_key = key.lower()
     if any(marker in lowered_key for marker in _SENSITIVE_MARKERS):
         if value in (None, ""):
@@ -153,7 +173,6 @@ def _mask_value(key: str, value: Any) -> Any:
 
 
 def _log_config(config: ConfigNamespace) -> None:
-    """Log all loaded settings using masked values for sensitive keys."""
     stack: list[tuple[str, Any]] = [("", config)]
     while stack:
         prefix, value = stack.pop()
@@ -166,7 +185,6 @@ def _log_config(config: ConfigNamespace) -> None:
 
 
 def _load_yaml_config(config_path: Path) -> dict[str, Any]:
-    """Load YAML configuration from disk or return an empty mapping if absent."""
     if not config_path.exists():
         logger.warning("Configuration file %s not found. Falling back to defaults.", config_path)
         return {}
@@ -188,7 +206,6 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
 
 
 def _resolve_paths(config: dict[str, Any], project_root: Path) -> None:
-    """Normalize configured filesystem paths to absolute values."""
     paths = config.setdefault("paths", {})
     for key, path_value in list(paths.items()):
         if not isinstance(path_value, str) or not path_value:
@@ -200,16 +217,17 @@ def _resolve_paths(config: dict[str, Any], project_root: Path) -> None:
 
 
 def _load_env_file(env_path: Path) -> None:
-    """Load environment values from ``.env`` without failing on missing files."""
     if env_path.exists():
         load_dotenv(dotenv_path=env_path, override=False)
         logger.info("Loaded environment variables from %s", env_path)
     else:
-        logger.warning("Environment file %s not found. Continuing with process environment only.", env_path)
+        logger.warning(
+            "Environment file %s not found. Continuing with process environment only.",
+            env_path,
+        )
 
 
 def _apply_env_overrides(config: dict[str, Any]) -> None:
-    """Apply environment values to the merged configuration map."""
     for env_name, (config_path, default) in _ENV_BINDINGS.items():
         value = os.getenv(env_name, default)
         _set_nested(config, config_path, value)
@@ -221,16 +239,6 @@ def get_config(
     *,
     force_reload: bool = False,
 ) -> ConfigNamespace:
-    """Return cached application configuration.
-
-    Args:
-        config_path: Optional explicit path to ``config.yaml``.
-        env_path: Optional explicit path to ``.env``.
-        force_reload: When ``True``, bypass cache and reload from disk.
-
-    Returns:
-        Loaded configuration object with both dict-style and attribute access.
-    """
     global _CONFIG_CACHE
 
     with _CONFIG_LOCK:

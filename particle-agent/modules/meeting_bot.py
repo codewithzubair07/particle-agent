@@ -217,6 +217,11 @@ class MeetingBot:
 
         try:
             driver = self._build_driver()
+            self._notify(
+                f"📅 *Joining meeting:* {session.title}\n"
+                f"URL: {session.url}\n\n"
+                "Particle is now attending this meeting on your behalf."
+            )
             self._join_url(driver, session.url)
             logger.info("Joined meeting '%s'", session.title)
             self._notify(f"🤝 Joined meeting: *{session.title}*")
@@ -304,6 +309,12 @@ class MeetingBot:
                 return False
             if _url_host_is(url, _ZOOM_HOST) and not _url_host_is(current_url, _ZOOM_HOST):
                 return False
+            try:
+                title = driver.title.lower()
+                if any(x in title for x in ["left", "ended", "removed"]):
+                    return False
+            except Exception:
+                pass
             return True
         except Exception:
             return False
@@ -347,6 +358,12 @@ class MeetingBot:
                         clone_agent.respond_to(text, session.title)
                     logger.debug("Meeting transcript chunk (%d chars)", len(text))
             except Exception as exc:
+                if "portaudio" in str(exc).lower() or "wasapi" in str(exc).lower():
+                    logger.warning(
+                        "Audio device error on Windows — transcript will be empty. "
+                        "Install a virtual audio cable for full transcription."
+                    )
+                    break
                 logger.error("Audio capture error: %s", exc)
                 time.sleep(5)
 
@@ -397,7 +414,8 @@ class MeetingBot:
     def _build_driver(self):
         """Build a headless Chrome WebDriver with microphone/camera permissions."""
         options = ChromeOptions()
-        options.add_argument("--headless=new")
+        options.add_argument("--window-size=1280,720")
+        options.add_argument("--start-minimized")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--use-fake-ui-for-media-stream")
@@ -405,11 +423,11 @@ class MeetingBot:
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
+        from webdriver_manager.chrome import ChromeDriverManager
         try:
             driver = webdriver.Chrome(options=options)
         except Exception:
-            # If chromedriver isn't in PATH, try with explicit service
-            service = ChromeService(executable_path="/usr/bin/chromedriver")
+            service = ChromeService(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(30)
         return driver

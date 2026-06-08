@@ -3,6 +3,7 @@ __pycache__/
 
 # Particle runtime artifacts
 particle-agent/data/*.db
+particle-agent/data/*.db-*
 particle-agent/data/chroma/
 particle-agent/logs/*.log
 particle-agent/.env

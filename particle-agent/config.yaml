@@ -59,8 +59,8 @@ clone:
 
 meeting_bot:
   enabled: true
-  google_email: "qjuber205@gmail.com"
-  google_password: "juberquraishi"
+  google_email: ""
+  google_password: ""
 
 browser:
   enabled: false

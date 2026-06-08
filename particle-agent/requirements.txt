@@ -30,6 +30,7 @@ python-docx>=1.0
 
 # Scheduling
 APScheduler>=3.10
+dateparser>=1.2
 
 # Voice — STT (cloud)
 # HF Inference API + ElevenLabs TTS (clone_agent) use requests

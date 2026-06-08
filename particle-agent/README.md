@@ -25,6 +25,8 @@ Particle is a personal AI chief of staff designed for 24/7 autonomous operation.
   - `EMAIL_ADDRESS`
   - `EMAIL_PASSWORD`
   - `GOOGLE_CALENDAR_CREDENTIALS`
+  - `GOOGLE_MEET_EMAIL`
+  - `GOOGLE_MEET_PASSWORD`
 
 ## Persona Cloning (Free Cloud Setup)
 

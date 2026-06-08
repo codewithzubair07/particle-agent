@@ -2,3 +2,4 @@ credentials.json
 data/calendar_token.pickle 
 data/google_cookies.json 
 .env 
+data/*.db-*

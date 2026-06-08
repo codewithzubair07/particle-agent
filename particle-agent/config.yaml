@@ -59,6 +59,7 @@ clone:
 
 meeting_bot:
   enabled: true
+  # Set with GOOGLE_MEET_EMAIL / GOOGLE_MEET_PASSWORD in .env
   google_email: ""
   google_password: ""
 

@@ -73,29 +73,32 @@ This loads `config.yaml` and `.env`, logs resolved settings with secrets masked,
 
 ## Deployment (Docker)
 
-1. Build image:
-   ```bash
-   docker build -t particle-agent:latest .
-   ```
-2. Start service:
-   ```bash
-   docker compose up -d
-   ```
+Run these from the `particle-agent/particle-agent` folder, after filling `.env`:
 
-## Deployment (systemd on Ubuntu 22.04)
+```bash
+docker compose up -d --build
+docker compose logs -f
+```
 
-1. Place project at `/home/ubuntu/particle-agent`.
-2. Ensure virtual environment exists at `/home/ubuntu/particle-agent/.venv`.
-3. Install service:
+The meeting bot is disabled in the image (`PARTICLE_DISABLE_MEETING_BOT=1`): it needs a visible Chrome window and audio devices.
+
+## Deployment (systemd on Ubuntu)
+
+1. Clone the repo to `/home/ubuntu/particle-agent` and create the virtual environment in `particle-agent/.venv`.
+2. Install `libportaudio2`, then `pip install -r requirements.txt` and copy `.env.example` to `.env`.
+3. Check the setup with `python main.py --validate`.
+4. Install the service:
    ```bash
    sudo cp particle.service /etc/systemd/system/particle.service
    sudo systemctl daemon-reload
    sudo systemctl enable --now particle.service
    ```
-4. Inspect logs:
+5. Inspect logs:
    ```bash
    journalctl -u particle.service -f
    ```
+
+Never put passwords or tokens in `config.yaml`: use `.env` (for example `GOOGLE_MEET_PASSWORD`).
 
 ## Project Layout
 

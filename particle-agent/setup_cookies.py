@@ -20,7 +20,7 @@ def main():
         print("Run first:  pip install undetected-chromedriver")
         return
 
-    print("Opening Chrome — sign in with qjuber205@gmail.com")
+    print("Opening Chrome — sign in with the Google account used by the meeting bot")
     print(f"You have {TIMEOUT_SECONDS} seconds.")
     print()
 

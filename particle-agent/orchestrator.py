@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import threading
 import time
@@ -193,6 +194,12 @@ class Orchestrator:
         threading.Event().wait()
 
     def _start_meeting_bot(self) -> None:
+        cfg = get_config()
+        if os.getenv("PARTICLE_DISABLE_MEETING_BOT") == "1" or not getattr(cfg.meeting_bot, "enabled", True):
+            logger.info("Meeting bot disabled")
+            threading.Event().wait()
+            return
+
         from modules.meeting_bot import get_meeting_bot
 
         bot = get_meeting_bot()

@@ -7,3 +7,8 @@ particle-agent/data/chroma/
 particle-agent/logs/*.log
 particle-agent/.env
 particle-agent/particle.pid
+particle-agent/data/*.db-wal
+particle-agent/data/*.db-shm
+particle-agent/data/google_cookies.json
+particle-agent/data/calendar_token.pickle
+particle-agent/credentials.json

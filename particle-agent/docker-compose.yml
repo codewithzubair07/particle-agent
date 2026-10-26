@@ -2,6 +2,7 @@ version: "3.9"
 
 services:
   particle:
+    build: .
     image: particle-agent:latest
     container_name: particle-agent
     restart: unless-stopped

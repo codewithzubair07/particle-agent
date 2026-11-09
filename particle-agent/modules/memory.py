@@ -55,6 +55,28 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _validate_limit(method_name: str, limit: int) -> int:
+    """Validate a *limit* argument shared by the Memory query methods.
+
+    SQLite treats ``LIMIT -1`` as "no limit" and silently accepts
+    zero or non-integer bindings, so invalid values must be rejected
+    before they reach a query.
+
+    Raises:
+        ValueError: If *limit* is not a strictly positive ``int``.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError(
+            f"Memory.{method_name}(): limit must be a positive integer, "
+            f"got {limit!r} of type {type(limit).__name__}"
+        )
+    if limit < 1:
+        raise ValueError(
+            f"Memory.{method_name}(): limit must be a positive integer, got {limit}"
+        )
+    return limit
+
+
 class Memory:
     """Thread-safe SQLite-backed conversation memory store."""
 
@@ -105,7 +127,12 @@ class Memory:
     def get_recent(
         self, session_id: str = "default", limit: int = 20
     ) -> list[dict]:
-        """Return the *limit* most-recent turns for a session, oldest first."""
+        """Return the *limit* most-recent turns for a session, oldest first.
+
+        Raises:
+            ValueError: If *limit* is not a strictly positive integer.
+        """
+        limit = _validate_limit("get_recent", limit)
         sql = (
             "SELECT role, content, created_at FROM conversations "
             "WHERE session_id = ? ORDER BY id DESC LIMIT ?"
@@ -135,7 +162,12 @@ class Memory:
         return cur.rowcount
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
-        """Full-text search across all conversation content (LIKE-based)."""
+        """Full-text search across all conversation content (LIKE-based).
+
+        Raises:
+            ValueError: If *limit* is not a strictly positive integer.
+        """
+        limit = _validate_limit("search", limit)
         sql = (
             "SELECT session_id, role, content, created_at FROM conversations "
             "WHERE content LIKE ? ORDER BY id DESC LIMIT ?"

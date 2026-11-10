@@ -161,6 +161,13 @@ class ContextLoader:
         logger.info("Context index_all: %d files, %d chunks", len(files), total)
         return total
 
+    def _chunk_id_prefix(self, path: Path) -> str:
+        """Return a stable id prefix that is unique per file in the context dir."""
+        try:
+            return path.resolve().relative_to(self._context_dir.resolve()).as_posix()
+        except ValueError:
+            return path.name
+
     def index_file(self, path: Path) -> int:
         """Index a single file; returns the number of chunks added/updated."""
         text = _read_file(path)
@@ -176,15 +183,19 @@ class ContextLoader:
             logger.debug("No ChromaDB collection — file %s not indexed", path)
             return 0
 
-        ids = [f"{path.name}::{i}" for i in range(len(chunks))]
-        metadatas = [{"source": str(path), "chunk": i} for i in range(len(chunks))]
+        prefix = self._chunk_id_prefix(path)
+        ids = [f"{prefix}::{i}" for i in range(len(chunks))]
+        metadatas = [
+            {"source": str(path), "chunk": i, "path": prefix}
+            for i in range(len(chunks))
+        ]
 
         try:
             with self._lock:
                 self._collection.upsert(  # type: ignore[union-attr]
                     ids=ids, documents=chunks, metadatas=metadatas
                 )
-            logger.info("Indexed %d chunks from %s", len(chunks), path.name)
+            logger.info("Indexed %d chunks from %s", len(chunks), prefix)
         except Exception as exc:
             logger.error("Failed to index %s: %s", path, exc)
             return 0

@@ -69,7 +69,7 @@ class LLMRouter:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _try_provider(self, provider: str, prompt: str, system: str) -> str | None:
+    def _try_provider(self, provider: str, prompt: str, system: str = "") -> str | None:
         """Attempt completion on *provider*, retrying transient errors.
 
         Returns the response text on success, or ``None`` when the provider
@@ -110,7 +110,7 @@ class LLMRouter:
         )
         return None
 
-    def _call_gemini(self, model: str, prompt: str, system: str) -> str:
+    def _call_gemini(self, model: str, prompt: str, system: str = "") -> str:
         """Call the Google Gemini REST API."""
         if not self._gemini_key:
             raise RuntimeError("GEMINI_API_KEY is not configured")
@@ -145,9 +145,10 @@ class LLMRouter:
         logger.info("Gemini model=%s responded (%d chars)", model, len(text))
         return text.strip()
 
-    def _call_openrouter(self, prompt: str, system: str) -> str:
+    def _call_openrouter(self, prompt: str, system: str = "") -> str:
         """Call the OpenRouter API, rotating through the free model list."""
-        if not self._openrouter_key:
+        key = (self._openrouter_key or "").strip()
+        if not key:
             raise RuntimeError("OPENROUTER_API_KEY is not configured")
 
         models: list[str] = list(self._cfg.openrouter_models)
@@ -168,32 +169,52 @@ class LLMRouter:
             "temperature": 0.7,
         }
         headers = {
-            "Authorization": f"Bearer {self._openrouter_key}",
+            "Authorization": f"Bearer {key}",
             "HTTP-Referer": "https://github.com/particle-agent",
             "X-Title": "Particle Agent",
         }
 
-        resp = requests.post(
-            _OPENROUTER_URL,
-            headers=headers,
-            json=payload,
-            timeout=self._timeout,
-        )
+        try:
+            resp = requests.post(
+                _OPENROUTER_URL,
+                headers=headers,
+                json=payload,
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            err_msg = str(exc)
+            if key in err_msg:
+                err_msg = err_msg.replace(key, "[REDACTED]")
+            raise RuntimeError(f"OpenRouter request failed: {err_msg}") from None
 
         if resp.status_code == 429:
             self._or_model_idx += 1
+            safe_text = resp.text.replace(key, "[REDACTED]")[:200]
             raise RateLimitError(
-                f"OpenRouter model={model} rate-limited: {resp.text[:200]}"
+                f"OpenRouter model={model} rate-limited: {safe_text}"
             )
-        resp.raise_for_status()
 
-        data = resp.json()
         try:
-            text: str = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as exc:
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            err_msg = str(exc)
+            if key in err_msg:
+                err_msg = err_msg.replace(key, "[REDACTED]")
             raise RuntimeError(
-                f"Unexpected OpenRouter response format: {str(data)[:400]}"
-            ) from exc
+                f"OpenRouter HTTP error for model {model}: {err_msg}"
+            ) from None
+
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RuntimeError("OpenRouter returned invalid JSON") from None
+
+        try:
+            text = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            raise RuntimeError("Unexpected OpenRouter response format") from None
+        if not isinstance(text, str):
+            raise RuntimeError("Unexpected OpenRouter response format")
 
         logger.info("OpenRouter model=%s responded (%d chars)", model, len(text))
         self._or_model_idx += 1

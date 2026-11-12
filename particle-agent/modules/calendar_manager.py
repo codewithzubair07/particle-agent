@@ -259,7 +259,7 @@ class CalendarManager:
             if event_id in self._reminded:
                 continue
 
-            start_str = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
+            start_str = event.get("start", {}).get("dateTime")
             start_dt = _parse_dt(start_str)
             if start_dt is None:
                 continue
